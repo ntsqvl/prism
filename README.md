@@ -66,3 +66,135 @@ POST /api/start-evaluation?vendor_name=Vendor+A
 ```
 
 **Poll for live status** (every 2 seconds)
+GET /api/workflow-status/{workflow_id}
+
+The response evolves through every stage over ~30 seconds:
+`intake → evaluation → conflict_check → stakeholder_alignment → escalated → complete`
+
+Agent scores trickle in one by one, the conflict appears mid-way, discussion messages populate, and the final recommendation lands at the end. Build your UI against this — it's the real shape of the data.
+
+**Full schema reference**
+GET /api/mock-schema
+
+Bookmark this. It's the contract everyone builds against.
+
+**Human reviewer — conflict escalation button**
+
+When `overall_status` is `escalated_to_procurement`, show the approval button. It calls:
+POST /api/resolve-conflict/{workflow_id}?resolution=escalated_to_procurement
+
+---
+
+### 🤖 Person 3 — financial_agent + technical_agent
+
+POST each result as your agents produce them:
+
+```bash
+POST /api/submit-evaluation
+```
+```json
+{
+  "workflow_id": "wf-abc12345",
+  "agent_name": "financial_agent",
+  "score": 95,
+  "verdict": "approved",
+  "note": "Lowest TCO among all vendors."
+}
+```
+
+---
+
+### 🤖 Person 4 — legal_agent + security_agent + Chief Procurement Agent
+
+POST each specialist result:
+
+```bash
+POST /api/submit-evaluation
+```
+```json
+{
+  "workflow_id": "wf-abc12345",
+  "agent_name": "security_agent",
+  "score": 40,
+  "verdict": "rejected",
+  "note": "Fails data residency requirements."
+}
+```
+
+Once all 4 specialist agents have submitted, conflict detection runs automatically and `workflow_stage` moves to `conflict_check` then `stakeholder_alignment`.
+
+Then your **Chief Procurement Agent** uses a separate endpoint:
+
+```bash
+POST /api/set-final-recommendation/{workflow_id}
+```
+```json
+{
+  "ranked_vendors": ["Vendor C", "Vendor B", "Vendor A"],
+  "justifications": {
+    "Vendor C": "Balanced cost and compliance — no major red flags.",
+    "Vendor B": "Strong compliance; cost high but acceptable.",
+    "Vendor A": "De-prioritized: data residency failure outweighs cost advantage."
+  },
+  "selected_vendor": "Vendor C"
+}
+```
+
+---
+
+## Reference
+
+### agent_name values
+
+| Agent | Person |
+|---|---|
+| `financial_agent` | Person 3 |
+| `technical_agent` | Person 3 |
+| `legal_agent` | Person 4 |
+| `security_agent` | Person 4 |
+
+### verdict values
+
+| Value | Meaning |
+|---|---|
+| `approved` | Agent recommends this vendor |
+| `rejected` | Agent recommends against |
+| `flagged` | Borderline — noted but doesn't trigger conflict |
+
+> `score` is an integer `0–100`. `verdict` and `agent_name` must match exactly as shown above.
+
+### overall_status values
+
+| Value | Meaning |
+|---|---|
+| `started` | Workflow just created |
+| `conflict_detected` | At least one approve vs. one reject |
+| `escalated_to_procurement` | Human reviewer must approve |
+| `awaiting_decision` | All agents in, no conflict |
+| `complete` | Final recommendation is set |
+| `timed_out` | Agents didn't respond in time |
+
+---
+
+## Workflow Shape
+
+intake
+
+└─ evaluation               ← agent scores trickle in here
+└─ conflict_check       ← auto-runs when all 4 are in
+├─ stakeholder_alignment   ← conflict exists, agents debate
+│    └─ escalated          ← human reviewer needed
+└─ decision                ← no conflict, straight to recommendation
+└─ complete
+
+---
+
+## Conflict Detection Rule
+
+A conflict triggers when **at least one agent verdicts `rejected` while at least one other verdicts `approved`** for the same vendor.
+
+For the demo to reliably show the conflict:
+- `financial_agent` → `approved`
+- `security_agent` → `rejected`
+
+The conflict type (`Cost vs Compliance`) and severity (`high` — score gap ≥ 50) are derived automatically.
