@@ -7,6 +7,33 @@ SET MOCK_MODE=false when real agents are ready.
 """
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from database import Base, engine
+
+# Import routers defensively so missing optional modules don't break app import
+try:
+    from routers.enterprise import router as enterprise_router
+except Exception:
+    enterprise_router = None
+
+try:
+    from routers.procurement import router as procurement_router
+except Exception:
+    procurement_router = None
+
+try:
+    from routers.vendor import router as vendor_router
+except Exception:
+    vendor_router = None
+
+try:
+    from routers.agent import router as agent_router
+except Exception:
+    agent_router = None
+
+try:
+    from routers.regulation import router as regulation_router
+except Exception:
+    regulation_router = None
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -43,6 +70,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register routers
+try:
+    app.include_router(enterprise_router)
+    app.include_router(procurement_router)
+    app.include_router(vendor_router)
+    app.include_router(agent_router)
+    app.include_router(regulation_router)
+except Exception:
+    # If import/setup fails, we still want the app to run for mock endpoints
+    pass
 
 # ===========================================================================
 # Models  (shared by mock + real paths)
