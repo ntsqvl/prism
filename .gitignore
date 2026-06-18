@@ -9,3 +9,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Ignore local environment variables (contains private keys)
+.env
+
+# Ignore the test folder
+tests/
+.pytest_cache
+scripts/
+
