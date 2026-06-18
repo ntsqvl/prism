@@ -2,38 +2,16 @@
 Vendor Selection & Governance API
 Person 2 — Band Orchestration Engineer
 
+Architecture:
+  - Document ingestion pipeline: PDF upload → extraction → chunking → embedding (GiGi's services)
+  - Mock workflow system: Agent evaluation → conflict detection → final decision (Role 2's endpoints)
+  - Database: PostgreSQL with pgvector for embeddings (Role 1's models)
+
 SET MOCK_MODE=true in .env to run without Band (unblocks teammates).
 SET MOCK_MODE=false when real agents are ready.
 """
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from database import Base, engine
-
-# Import routers defensively so missing optional modules don't break app import
-try:
-    from routers.enterprise import router as enterprise_router
-except Exception:
-    enterprise_router = None
-
-try:
-    from routers.procurement import router as procurement_router
-except Exception:
-    procurement_router = None
-
-try:
-    from routers.vendor import router as vendor_router
-except Exception:
-    vendor_router = None
-
-try:
-    from routers.agent import router as agent_router
-except Exception:
-    agent_router = None
-
-try:
-    from routers.regulation import router as regulation_router
-except Exception:
-    regulation_router = None
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -43,6 +21,60 @@ from datetime import datetime
 import asyncio
 import json
 import os
+import logging
+
+from database import Base, engine, SessionLocal, get_db
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create tables on startup (only if DATABASE_URL is set and DB is reachable)
+def init_db():
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database tables initialized")
+    except Exception as e:
+        logger.warning(f"⚠️  Could not initialize database tables: {e}")
+        logger.info("   (This is OK for MOCK_MODE=true development)")
+
+# Import routers defensively so missing optional modules don't break app import
+try:
+    from routers.enterprise import router as enterprise_router
+except Exception as e:
+    logger.warning(f"⚠️  Could not import enterprise router: {e}")
+    enterprise_router = None
+
+try:
+    from routers.procurement import router as procurement_router
+except Exception as e:
+    logger.warning(f"⚠️  Could not import procurement router: {e}")
+    procurement_router = None
+
+try:
+    from routers.vendor import router as vendor_router
+except Exception as e:
+    logger.warning(f"⚠️  Could not import vendor router: {e}")
+    vendor_router = None
+
+try:
+    from routers.agent import router as agent_router
+except Exception as e:
+    logger.warning(f"⚠️  Could not import agent router: {e}")
+    agent_router = None
+
+try:
+    from routers.regulation import router as regulation_router
+except Exception as e:
+    logger.warning(f"⚠️  Could not import regulation router: {e}")
+    regulation_router = None
+
+# Import embedding service for integration
+try:
+    from services.embedding_service import run_embeddings_for_cycle
+except Exception as e:
+    logger.warning(f"⚠️  Could not import embedding service: {e}")
+    run_embeddings_for_cycle = None
 
 # ---------------------------------------------------------------------------
 # Toggle: flip to False once real agents exist
@@ -58,10 +90,14 @@ if not MOCK_MODE:
     )
 
 # ===========================================================================
-# App
+# App Initialization
 # ===========================================================================
 
-app = FastAPI(title="Vendor Selection & Governance API", version="0.2.0")
+app = FastAPI(
+    title="Vendor Selection & Governance API",
+    version="0.2.0",
+    description="Autonomous vendor selection with multi-agent evaluation and AI-powered context discovery"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,16 +107,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize database on startup
+init_db()
+
 # Register routers
-try:
+if enterprise_router:
     app.include_router(enterprise_router)
+if procurement_router:
     app.include_router(procurement_router)
+if vendor_router:
     app.include_router(vendor_router)
+if agent_router:
     app.include_router(agent_router)
+if regulation_router:
     app.include_router(regulation_router)
-except Exception:
-    # If import/setup fails, we still want the app to run for mock endpoints
-    pass
 
 # ===========================================================================
 # Models  (shared by mock + real paths)
@@ -606,7 +646,30 @@ async def get_mock_schema():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "mock_mode": MOCK_MODE, "active_workflows": len(ACTIVE_WORKFLOWS)}
+    """
+    Health check endpoint.
+    Tests both mock workflow system and database connectivity.
+    """
+    db_status = "unavailable"
+    try:
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        db_status = "connected"
+    except Exception as e:
+        logger.warning(f"Database health check failed: {e}")
+        db_status = f"error: {str(e)[:50]}"
+    
+    return {
+        "status": "ok",
+        "mock_mode": MOCK_MODE,
+        "active_workflows": len(ACTIVE_WORKFLOWS),
+        "database": db_status,
+        "services": {
+            "embedding": "available" if run_embeddings_for_cycle else "unavailable",
+        }
+    }
+
 
 
 if __name__ == "__main__":
