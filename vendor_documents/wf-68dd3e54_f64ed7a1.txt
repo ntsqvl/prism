@@ -1,0 +1,7 @@
+VENDOR CONTRACT
+
+Vendor Name: TestVendor
+Service Level Agreement: 99.9% uptime
+Data Residency: EU-only
+Compliance: GDPR, ISO 27001
+Cost: $50,000/year

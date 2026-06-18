@@ -6,7 +6,7 @@ SET MOCK_MODE=true in .env to run without Band (unblocks teammates).
 SET MOCK_MODE=false when real agents are ready.
 """
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -16,6 +16,8 @@ from datetime import datetime
 import asyncio
 import json
 import os
+import shutil
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Toggle: flip to False once real agents exist
@@ -133,6 +135,13 @@ class EvaluationSubmission(BaseModel):
 # ===========================================================================
 
 ACTIVE_WORKFLOWS: Dict[str, WorkflowStatus] = {}
+
+# Document storage (for Role 1 to pick up and vectorize)
+UPLOADS_DIR = Path("./vendor_documents")
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+# Track uploaded documents per workflow
+WORKFLOW_DOCUMENTS: Dict[str, List[Dict]] = {}  # workflow_id → [{filename, path, uploaded_at}]
 
 AGENT_DOMAIN_MAP = {
     "financial_agent": "Cost",
@@ -497,6 +506,102 @@ async def resolve_conflict(workflow_id: str, resolution: str = "escalated_to_pro
     return {"status": "ok"}
 
 
+@app.post("/api/upload-vendor-document/{workflow_id}")
+async def upload_vendor_document(workflow_id: str, file: UploadFile = File(...)):
+    """
+    Upload vendor contract/document. Stores locally and notifies Role 1 for vectorization.
+    Supports: PDF, TXT, DOCX.
+    """
+    wf = ACTIVE_WORKFLOWS.get(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    # Validate file type
+    allowed_extensions = {".pdf", ".txt", ".docx"}
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(status_code=400, 
+            detail=f"Unsupported file type. Allowed: {allowed_extensions}")
+
+    try:
+        # Generate unique filename to avoid collisions
+        unique_filename = f"{workflow_id}_{uuid.uuid4().hex[:8]}{file_ext}"
+        file_path = UPLOADS_DIR / unique_filename
+
+        # Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Track document
+        if workflow_id not in WORKFLOW_DOCUMENTS:
+            WORKFLOW_DOCUMENTS[workflow_id] = []
+        
+        doc_entry = {
+            "filename": file.filename,
+            "stored_path": str(file_path),
+            "uploaded_at": datetime.now().isoformat(),
+            "size_bytes": file_path.stat().st_size,
+        }
+        WORKFLOW_DOCUMENTS[workflow_id].append(doc_entry)
+
+        # Log to audit trail
+        _log(wf, f"Document uploaded: {file.filename} ({file_path.stat().st_size} bytes)")
+        wf.last_updated = datetime.now().isoformat()
+
+        return {
+            "status": "ok",
+            "filename": file.filename,
+            "stored_path": str(file_path),
+            "message": "Document uploaded successfully. Notify Role 1 to vectorize.",
+        }
+
+    except Exception as e:
+        _log(wf, f"Document upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/api/retry-evaluation/{workflow_id}/{agent_name}")
+async def retry_evaluation(workflow_id: str, agent_name: str):
+    """
+    Reset an agent's evaluation to allow re-processing.
+    Used when an agent needs to re-evaluate due to new information or error.
+    """
+    wf = ACTIVE_WORKFLOWS.get(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    if agent_name not in AGENT_DOMAIN_MAP:
+        raise HTTPException(status_code=400,
+            detail=f"Unknown agent. Must be one of: {list(AGENT_DOMAIN_MAP.keys())}")
+
+    # Only allow retry if agent has already evaluated
+    if wf.agent_evaluations.get(agent_name) is None:
+        raise HTTPException(status_code=400, detail=f"{agent_name} has not evaluated yet")
+
+    # Reset the evaluation
+    old_verdict = wf.agent_evaluations[agent_name].verdict
+    wf.agent_evaluations[agent_name] = None
+    wf.last_updated = datetime.now().isoformat()
+    _log(wf, f"Retry requested for {agent_name} (was: {old_verdict})")
+
+    # If conflict existed, clear it (will be re-detected when all 4 are in)
+    if wf.conflict.exists:
+        wf.conflict = ConflictDetail()
+        wf.overall_status = "evaluation_reset"
+        _log(wf, "Conflict cleared pending re-evaluation")
+
+    # Revert to evaluation stage
+    wf.workflow_stage = WorkflowStage.EVALUATION
+    wf.last_updated = datetime.now().isoformat()
+
+    return {
+        "status": "ok",
+        "agent_name": agent_name,
+        "message": f"Evaluation reset. {agent_name} should re-submit.",
+    }
+
+
+
 @app.post("/api/set-final-recommendation/{workflow_id}")
 async def set_final_recommendation(workflow_id: str, recommendation: FinalRecommendation):
     """Chief Procurement Agent POSTs the final ranked vendor list here."""
@@ -510,6 +615,24 @@ async def set_final_recommendation(workflow_id: str, recommendation: FinalRecomm
     wf.last_updated = datetime.now().isoformat()
     _log(wf, f"Final recommendation set: {recommendation.selected_vendor}")
     return {"status": "ok"}
+
+
+@app.get("/api/vendor-documents/{workflow_id}")
+async def get_vendor_documents(workflow_id: str):
+    """
+    Role 1 calls this to fetch all uploaded documents for a workflow.
+    Returns metadata + file paths for vectorization.
+    """
+    if workflow_id not in WORKFLOW_DOCUMENTS:
+        return {"workflow_id": workflow_id, "documents": []}
+    
+    vendor_name = ACTIVE_WORKFLOWS.get(workflow_id, {}).vendor_name if workflow_id in ACTIVE_WORKFLOWS else None
+    return {
+        "workflow_id": workflow_id,
+        "vendor_name": vendor_name,
+        "documents": WORKFLOW_DOCUMENTS[workflow_id],
+        "message": "Pass stored_path to your vectorization pipeline."
+    }
 
 
 @app.get("/api/mock-schema")
