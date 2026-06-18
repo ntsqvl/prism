@@ -142,6 +142,71 @@ POST /api/set-final-recommendation/{workflow_id}
 
 ---
 
+### 📄 Person 1 — Vector Database & Vendor Documents
+
+**Upload vendor contract/document**
+
+```bash
+POST /api/upload-vendor-document/{workflow_id}
+# Multipart form with file: {pdf, txt, or docx}
+```
+
+Response:
+```json
+{
+  "status": "ok",
+  "filename": "contract.pdf",
+  "stored_path": "./vendor_documents/wf-abc12345_a1b2c3d4.pdf",
+  "message": "Document uploaded successfully. Notify Role 1 to vectorize."
+}
+```
+
+**Fetch uploaded documents for vectorization**
+
+```bash
+GET /api/vendor-documents/{workflow_id}
+```
+
+Response:
+```json
+{
+  "workflow_id": "wf-abc12345",
+  "vendor_name": "CloudSecure Inc.",
+  "documents": [
+    {
+      "filename": "contract.pdf",
+      "stored_path": "./vendor_documents/wf-abc12345_a1b2c3d4.pdf",
+      "uploaded_at": "2026-06-18T11:20:00",
+      "size_bytes": 245678
+    }
+  ],
+  "message": "Pass stored_path to your vectorization pipeline."
+}
+```
+
+---
+
+### 🔄 Person 2 — Workflow Management (New Endpoints)
+
+**Retry agent evaluation** (if agent needs to re-evaluate)
+
+```bash
+POST /api/retry-evaluation/{workflow_id}/{agent_name}
+```
+
+Response:
+```json
+{
+  "status": "ok",
+  "agent_name": "financial_agent",
+  "message": "Evaluation reset. financial_agent should re-submit."
+}
+```
+
+This clears the agent's prior evaluation and reverts the workflow to `evaluation` stage so they can re-submit. Useful if new vendor info becomes available or an evaluation needs correction.
+
+---
+
 ## Reference
 
 ### agent_name values
